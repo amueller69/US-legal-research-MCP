@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.db
+*.db-journal
+chroma_db/
