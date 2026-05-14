@@ -1,11 +1,11 @@
 """Bills and session laws tools - integrates with GovInfo MCP."""
 
-from mcp import tool
+from legal_mcp._app import mcp
 
 
-@tool(
-    readOnlyHint=True,
-    description="Retrieve a public law (session law) by citation"
+@mcp.tool(
+    description="Retrieve a public law (session law) by citation",
+    annotations={"readOnlyHint": True},
 )
 async def get_public_law(congress: int, law_number: int) -> dict:
     """
@@ -35,12 +35,12 @@ async def get_public_law(congress: int, law_number: int) -> dict:
     # 1. Query SQLite cache first
     # 2. If not cached, call GovInfo MCP
     # 3. Parse and return result
-    raise NotImplementedError("Public law retrieval not yet implemented")
+    return {"error": "Public law retrieval not yet implemented. GovInfo MCP integration is planned for Phase 3."}
 
 
-@tool(
-    readOnlyHint=True,
-    description="Search for bills and legislation"
+@mcp.tool(
+    description="Search for bills and legislation",
+    annotations={"readOnlyHint": True},
 )
 async def search_bills(query: str, congress: int = 119, limit: int = 10) -> list[dict]:
     """
@@ -72,4 +72,4 @@ async def search_bills(query: str, congress: int = 119, limit: int = 10) -> list
     # 1. Call GovInfo MCP searchGovInfo tool
     # 2. Filter results by congress
     # 3. Parse and format results
-    raise NotImplementedError("Bill search not yet implemented")
+    return [{"error": "Bill search not yet implemented. GovInfo MCP integration is planned for Phase 3."}]

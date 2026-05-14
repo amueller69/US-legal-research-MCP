@@ -1,11 +1,11 @@
 """Semantic and full-text search tools."""
 
-from mcp import tool
+from legal_mcp._app import mcp
 
 
-@tool(
-    readOnlyHint=True,
-    description="Semantic search across US Code using vector similarity"
+@mcp.tool(
+    description="Semantic search across US Code using vector similarity",
+    annotations={"readOnlyHint": True},
 )
 async def search_usc_semantic(query: str, limit: int = 10) -> list[dict]:
     """
@@ -32,17 +32,39 @@ async def search_usc_semantic(query: str, limit: int = 10) -> list[dict]:
         - "civil rights violations by law enforcement"
         - "employment discrimination remedies"
     """
-    # TODO: Implement semantic search
-    # 1. Query ChromaDB with vector similarity
-    # 2. Filter by source_type='usc'
-    # 3. Enrich results with full data from SQLite
-    # 4. Return ranked results
-    raise NotImplementedError("USC semantic search not yet implemented")
+    from legal_mcp.storage import chroma_client
+
+    results = await chroma_client.search(
+        query, n_results=limit, where={"source_type": "usc"}
+    )
+
+    ids = results.get("ids", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+
+    output = []
+    for i, doc_id in enumerate(ids):
+        meta = metadatas[i] if i < len(metadatas) else {}
+        distance = distances[i] if i < len(distances) else 1.0
+        doc = documents[i] if i < len(documents) else ""
+
+        output.append({
+            "citation": meta.get("citation"),
+            "heading": meta.get("heading"),
+            "similarity_score": round(1 - distance, 4),
+            "excerpt": doc[:500] if doc else "",
+            "title": meta.get("title"),
+            "section": meta.get("section"),
+            "chapter": meta.get("chapter"),
+        })
+
+    return output
 
 
-@tool(
-    readOnlyHint=True,
-    description="Semantic search across Code of Federal Regulations"
+@mcp.tool(
+    description="Semantic search across Code of Federal Regulations",
+    annotations={"readOnlyHint": True},
 )
 async def search_cfr_semantic(query: str, limit: int = 10) -> list[dict]:
     """
@@ -59,14 +81,41 @@ async def search_cfr_semantic(query: str, limit: int = 10) -> list[dict]:
         - "tax-exempt retirement plans"
         - "environmental impact assessments"
     """
-    # TODO: Implement CFR semantic search
-    # Similar to search_usc_semantic but filter by source_type='cfr'
-    raise NotImplementedError("CFR semantic search not yet implemented")
+    from legal_mcp.storage import chroma_client
+
+    results = await chroma_client.search(
+        query, n_results=limit, where={"source_type": "cfr"}
+    )
+
+    ids = results.get("ids", [[]])[0]
+    if not ids:
+        return [{"message": "CFR data not yet loaded. Run 'legal-mcp setup' and CFR indexing when available."}]
+
+    distances = results.get("distances", [[]])[0]
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+
+    output = []
+    for i, doc_id in enumerate(ids):
+        meta = metadatas[i] if i < len(metadatas) else {}
+        distance = distances[i] if i < len(distances) else 1.0
+        doc = documents[i] if i < len(documents) else ""
+
+        output.append({
+            "citation": meta.get("citation"),
+            "heading": meta.get("heading"),
+            "similarity_score": round(1 - distance, 4),
+            "excerpt": doc[:500] if doc else "",
+            "title": meta.get("title"),
+            "section": meta.get("section"),
+        })
+
+    return output
 
 
-@tool(
-    readOnlyHint=True,
-    description="Full-text keyword search using SQLite FTS"
+@mcp.tool(
+    description="Full-text keyword search using SQLite FTS",
+    annotations={"readOnlyHint": True},
 )
 async def search_fulltext(query: str, source: str = "usc", limit: int = 20) -> list[dict]:
     """
@@ -74,7 +123,7 @@ async def search_fulltext(query: str, source: str = "usc", limit: int = 20) -> l
 
     Args:
         query: Search terms (supports AND, OR, NOT, "exact phrases")
-        source: Data source to search ('usc', 'cfr', 'all')
+        source: Data source to search ('usc' or 'cfr')
         limit: Maximum results (default: 20)
 
     Returns:
@@ -83,18 +132,32 @@ async def search_fulltext(query: str, source: str = "usc", limit: int = 20) -> l
     Examples:
         - search_fulltext("due process", source="usc")
         - search_fulltext("commerce AND interstate", source="usc")
-        - search_fulltext('"equal protection" NOT state', source="all")
+        - search_fulltext('"equal protection" NOT state', source="usc")
     """
-    # TODO: Implement FTS search
-    # 1. Use SQLite FTS5 for fast keyword search
-    # 2. Support boolean operators
-    # 3. Return snippets with match highlights
-    raise NotImplementedError("Full-text search not yet implemented")
+    from legal_mcp.storage import sqlite_db
+
+    if source not in ("usc", "cfr"):
+        return [{"error": f"Invalid source '{source}'. Use 'usc' or 'cfr'."}]
+
+    table = f"{source}_sections"
+    results = await sqlite_db.search_fulltext(query, table, limit)
+
+    return [
+        {
+            "citation": r.get("citation"),
+            "heading": r.get("heading"),
+            "snippet": r.get("snippet"),
+            "title": r.get("title"),
+            "section": r.get("section"),
+            "chapter": r.get("chapter"),
+        }
+        for r in results
+    ]
 
 
-@tool(
-    readOnlyHint=True,
-    description="Get status of Legal MCP databases"
+@mcp.tool(
+    description="Get status of Legal MCP databases",
+    annotations={"readOnlyHint": True},
 )
 async def get_database_status() -> dict:
     """
@@ -105,18 +168,37 @@ async def get_database_status() -> dict:
             "sqlite": {
                 "usc_sections": 55000,
                 "cfr_sections": 0,
-                "last_updated": "2026-04-13",
-                "release_point": "Public Law 119-83"
+                "release_point": "Public Law 119-84",
+                "last_updated": "2026-04-25T..."
             },
             "chromadb": {
-                "documents": 55000,
+                "count": 55000,
                 "embedding_model": "all-MiniLM-L6-v2",
-                "collection_size_mb": 450
+                ...
             }
         }
     """
-    # TODO: Implement status check
-    # 1. Query SQLite for table counts
-    # 2. Query ChromaDB for collection info
-    # 3. Read metadata table for last update times
-    raise NotImplementedError("Database status check not yet implemented")
+    from legal_mcp.storage import sqlite_db, chroma_client, get_metadata, get_collection_info
+
+    conn = sqlite_db._get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) as n FROM usc_sections")
+    usc_count = cursor.fetchone()["n"]
+
+    cursor.execute("SELECT COUNT(*) as n FROM cfr_sections")
+    cfr_count = cursor.fetchone()["n"]
+
+    release_point = await get_metadata("usc_release_point")
+    last_update = await get_metadata("last_usc_update")
+    chroma_info = await get_collection_info()
+
+    return {
+        "sqlite": {
+            "usc_sections": usc_count,
+            "cfr_sections": cfr_count,
+            "release_point": release_point or "not initialized",
+            "last_updated": last_update,
+        },
+        "chromadb": chroma_info,
+    }

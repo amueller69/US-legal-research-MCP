@@ -224,5 +224,14 @@ __marimo__/
 *.swo
 *~
 *.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 *.db-journal
 chroma_db/
+
+# Legal MCP local runtime artifacts
+.config/legal-mcp/
+.cache/legal-mcp/
+usc-xml/

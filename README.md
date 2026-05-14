@@ -1,129 +1,178 @@
 # Legal MCP
 
-MCP server providing structured and semantic access to federal legal resources (US Code, CFR, bills, session laws) for legal research in Claude Code.
+Local MCP server for federal legal research in Claude Code. The current MVP focuses on US Code lookup and search backed by local SQLite and ChromaDB storage.
 
-## Status: 🚧 In Development
+## Current Status
 
-**Current Phase:** MCP scaffolding complete, functionality implementation in progress
+Phase 1 MVP is focused on US Code support:
 
-See [`LEGAL_MCP_MASTER_PLAN.md`](../LEGAL_MCP_MASTER_PLAN.md) for complete technical reference.
+- USC citation lookup by title and section
+- USC table of contents lookup by title
+- SQLite full-text search
+- ChromaDB semantic search with local embeddings
+- CLI setup, update, and database status commands
+- FastMCP stdio server for local MCP clients
 
-## Features (Planned)
+Registered but not yet implemented:
 
-### Core MVP
-- **US Code**: Citation lookup, semantic search, full-text search, navigation
-- **CFR**: Regulatory lookup, cross-references to USC
-- **Session Laws**: Public laws (Statutes at Large) - authoritative for non-positive law USC
+- CFR section lookup
+- USC-to-CFR implementing regulation lookup
+- Public law retrieval
+- Bill search
 
-### Search Capabilities
-- **Semantic**: Find conceptually related sections ("qualified immunity" → 42 USC § 1983)
-- **Citation**: Instant lookup by citation (<100ms)
-- **Full-text**: Keyword search with boolean operators
+Those tools currently return explicit "not yet implemented" responses.
 
-## Installation (WIP)
+## Fresh Setup
+
+From a new clone:
 
 ```bash
-cd legal-mcp
-pip install -e .
+git clone <repo-url> US-legal-research-MCP
+cd US-legal-research-MCP
 
-# Configure (TODO: implement setup)
+python3 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install -e .
+```
+
+For development and tests:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+This installs into the active virtual environment. Do not run the install commands outside the venv unless you intentionally want a global install.
+
+## Build The Local Databases
+
+Initial setup downloads the current US Code XML release from house.gov, parses it, stores structured data in SQLite, and indexes semantic documents in ChromaDB:
+
+```bash
 legal-mcp setup
+```
 
-# Build databases (TODO: implement update-db)
-legal-mcp update-db
+This can take a while on the first run because it parses and embeds the US Code locally. Check the result with:
 
-# Check status
+```bash
 legal-mcp db-status
 ```
 
-## Usage with Claude Code
+To check for a newer US Code release later:
 
-Add to your MCP client config (e.g., Claude Desktop):
+```bash
+legal-mcp update-db
+```
+
+To force a clean rebuild:
+
+```bash
+legal-mcp update-db --force
+```
+
+`--force` clears existing USC rows/vectors and rebuilds from the current release.
+
+## Update Behavior
+
+`legal-mcp update-db` uses a two-stage USC update process:
+
+1. Compare title-level XML hashes as a cheap first-pass detector.
+2. For changed title XML files, parse sections and compare normalized per-section content hashes.
+
+Only new or changed sections are re-embedded. Removed sections are deleted from SQLite and ChromaDB. Raw XML metadata churn, generated IDs, timestamps, and whitespace should not trigger re-embedding unless the extracted indexed section content changes.
+
+After successful non-limited setup/update runs, stale USC XML release cache folders are pruned and the current release cache is kept.
+
+## Storage Locations
+
+Runtime data is stored outside the repository:
+
+```text
+~/.config/legal-mcp/legal.db
+~/.config/legal-mcp/chroma_db/
+~/.cache/legal-mcp/usc-xml/
+```
+
+The SQLite database stores structured sections, metadata, title hashes, and section content hashes. ChromaDB stores semantic search vectors. The XML cache stores extracted house.gov USC release files used for setup/update.
+
+## Claude Code / MCP Client Config
+
+For local use, stdio is the intended transport. HTTP is not required.
+
+Use the absolute path to the `legal-mcp` executable inside your venv:
 
 ```json
 {
   "mcpServers": {
     "legal-mcp": {
-      "command": "legal-mcp",
-      "args": ["serve"],
+      "command": "/absolute/path/to/US-legal-research-MCP/.venv/bin/legal-mcp",
+      "args": ["serve", "--transport", "stdio"],
       "env": {}
     }
   }
 }
 ```
 
-Then use in Claude Code:
-```
+Example prompts after setup:
+
+```text
+Get 42 USC 1983
 Search USC for "qualified immunity for police officers"
-Get 42 USC § 1983
-Find CFR regulations implementing 26 USC § 401
+Search full text for "equal protection"
+Show the table of contents for title 42
 ```
 
-## Architecture
+## CLI Commands
 
-**Dual Storage:**
-- **SQLite**: Structured data (citations, cross-references, metadata) - fast exact lookup
-- **ChromaDB**: Vector embeddings (semantic search) - conceptual discovery
-
-**Data Sources:**
-- US Code XML from house.gov (bulk download)
-- eCFR API for regulations
-- GovInfo MCP for bills/session laws
-
-**Embedding Model:** sentence-transformers/all-MiniLM-L6-v2 (free, local, proven)
-
-## Project Structure
-
-```
-legal-mcp/
-├── src/legal_mcp/
-│   ├── server.py              # FastMCP server (COMPLETE)
-│   ├── cli.py                 # CLI commands (SCAFFOLDING)
-│   ├── data/                  # Data ingestion (TODO)
-│   │   ├── usc_parser.py      # Parse USC XML
-│   │   ├── cfr_client.py      # eCFR API
-│   │   └── govinfo_wrapper.py # GovInfo MCP integration
-│   ├── storage/               # Storage layer (TODO)
-│   │   ├── sqlite_db.py       # SQLite operations
-│   │   └── chroma_client.py   # ChromaDB wrapper
-│   ├── tools/                 # MCP tools (SIGNATURES DEFINED)
-│   │   ├── usc_tools.py       # USC tools
-│   │   ├── cfr_tools.py       # CFR tools
-│   │   ├── bill_tools.py      # Bill/session law tools
-│   │   └── search_tools.py    # Search tools
-│   └── utils/                 # Utilities (TODO)
-│       └── citation_parser.py # Parse legal citations
-└── tests/                     # Tests (TODO)
+```bash
+legal-mcp --help
+legal-mcp setup
+legal-mcp update-db
+legal-mcp update-db --force
+legal-mcp db-status
+legal-mcp serve --transport stdio
 ```
 
-## Implementation Status
-
-✅ **Complete:**
-- Project structure
-- FastMCP server setup
-- MCP tool signatures and contracts
-- Database schema (documented in master plan)
-
-🚧 **In Progress:**
-- USC XML parser
-- SQLite database implementation
-- ChromaDB integration
-- Tool implementations
-
-❌ **Not Started:**
-- CFR integration
-- GovInfo MCP wrapper
-- Testing suite
-- Evaluation questions
+`legal-mcp serve --transport streamable-http --port 8000` is available for HTTP experiments, but local Claude/Claude Code usage should normally use stdio.
 
 ## Development
 
-See [`LEGAL_MCP_MASTER_PLAN.md`](../LEGAL_MCP_MASTER_PLAN.md) for:
-- Complete architecture details
-- Database schemas
-- Data source specifications
-- Implementation patterns
-- Reference resources
+Run tests:
+
+```bash
+source .venv/bin/activate
+python -m pytest -q
+```
+
+Current smoke coverage includes storage operations, CLI help/status behavior, and FastMCP tool registration.
+
+## Project Structure
+
+```text
+US-legal-research-MCP/
+├── src/legal_mcp/
+│   ├── _app.py                # Shared FastMCP app and lifecycle
+│   ├── server.py              # Server entrypoint and tool registration
+│   ├── cli.py                 # setup/update/db-status/serve commands
+│   ├── data/
+│   │   ├── usc_parser.py      # USC XML download, parse, hash, cache helpers
+│   │   ├── cfr_client.py      # Future eCFR integration
+│   │   └── govinfo_wrapper.py # Future GovInfo integration
+│   ├── storage/
+│   │   ├── sqlite_db.py       # Structured storage and FTS
+│   │   └── chroma_client.py   # Vector storage and semantic search
+│   └── tools/
+│       ├── usc_tools.py
+│       ├── search_tools.py
+│       ├── cfr_tools.py
+│       └── bill_tools.py
+└── tests/
+```
+
+## Reference Docs
+
+- `LEGAL_MCP_MASTER_PLAN.md`
+- `STORAGE_IMPLEMENTATION.md`
 
 ## License
 

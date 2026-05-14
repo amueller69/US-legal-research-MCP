@@ -1,48 +1,24 @@
+"""Legal MCP server entrypoint.
+
+The shared FastMCP app is defined in :mod:`legal_mcp._app`. Importing
+``legal_mcp.tools`` registers all tool functions via ``@mcp.tool`` decorators.
 """
-Legal MCP Server - FastMCP server with tool registration.
 
-This module sets up the MCP server and registers all legal research tools.
-Tools are implemented in the tools/ subdirectory.
-"""
+from legal_mcp._app import mcp
 
-from mcp import FastMCP
-from legal_mcp.tools import usc_tools, cfr_tools, bill_tools, search_tools
+import legal_mcp.tools  # noqa: F401 - side effect: registers all tools
 
-# Initialize FastMCP server
-mcp = FastMCP("legal-mcp")
-
-
-@mcp.on_startup()
-async def startup():
-    """Initialize database connections and resources on server startup."""
-    from legal_mcp.storage import sqlite_db, chroma_client
-
-    # Initialize storage layers
-    await sqlite_db.initialize()
-    await chroma_client.initialize()
-
-    print("Legal MCP server initialized")
+# Re-export tool functions for tests and direct imports.
+from legal_mcp.tools.bill_tools import get_public_law, search_bills  # noqa: F401
+from legal_mcp.tools.cfr_tools import get_cfr_section, find_implementing_regulations  # noqa: F401
+from legal_mcp.tools.search_tools import (  # noqa: F401
+    get_database_status,
+    search_cfr_semantic,
+    search_fulltext,
+    search_usc_semantic,
+)
+from legal_mcp.tools.usc_tools import get_title_toc, get_usc_section  # noqa: F401
 
 
-# Register USC tools
-mcp.tool()(usc_tools.get_usc_section)
-mcp.tool()(usc_tools.get_title_toc)
-
-# Register CFR tools
-mcp.tool()(cfr_tools.get_cfr_section)
-mcp.tool()(cfr_tools.find_implementing_regulations)
-
-# Register bill/session law tools
-mcp.tool()(bill_tools.get_public_law)
-mcp.tool()(bill_tools.search_bills)
-
-# Register search tools
-mcp.tool()(search_tools.search_usc_semantic)
-mcp.tool()(search_tools.search_cfr_semantic)
-mcp.tool()(search_tools.search_fulltext)
-mcp.tool()(search_tools.get_database_status)
-
-
-# Entry point for MCP clients
 if __name__ == "__main__":
     mcp.run()

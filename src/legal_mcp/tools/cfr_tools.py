@@ -1,11 +1,11 @@
 """CFR (Code of Federal Regulations) tools."""
 
-from mcp import tool
+from legal_mcp._app import mcp
 
 
-@tool(
-    readOnlyHint=True,
-    description="Retrieve a CFR section by citation"
+@mcp.tool(
+    description="Retrieve a CFR section by citation",
+    annotations={"readOnlyHint": True},
 )
 async def get_cfr_section(title: str, part: str, section: str) -> dict:
     """
@@ -32,12 +32,12 @@ async def get_cfr_section(title: str, part: str, section: str) -> dict:
     # 2. If not cached, fetch from eCFR API
     # 3. Cache result in SQLite
     # 4. Return formatted result
-    raise NotImplementedError("CFR section lookup not yet implemented")
+    return {"error": "CFR lookup not yet implemented. eCFR API integration is planned for Phase 2."}
 
 
-@tool(
-    readOnlyHint=True,
-    description="Find CFR regulations implementing a USC section"
+@mcp.tool(
+    description="Find CFR regulations implementing a USC section",
+    annotations={"readOnlyHint": True},
 )
 async def find_implementing_regulations(usc_citation: str) -> list[dict]:
     """
@@ -64,4 +64,4 @@ async def find_implementing_regulations(usc_citation: str) -> list[dict]:
     # 2. Query cross_references table
     # 3. Fetch CFR sections
     # 4. Return results
-    raise NotImplementedError("Cross-reference lookup not yet implemented")
+    return [{"error": "Cross-reference lookup not yet implemented. Planned for Phase 2 after CFR indexing."}]

@@ -61,6 +61,7 @@ async def initialize():
             text TEXT NOT NULL,
             chapter TEXT,
             subchapter TEXT,
+            content_hash TEXT,
             effective_date TEXT,
             source_law TEXT,
             last_updated TEXT,
@@ -123,6 +124,21 @@ async def initialize():
             updated_at TEXT
         )
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usc_title_hashes (
+            title TEXT PRIMARY KEY,
+            xml_hash TEXT NOT NULL,
+            release_point TEXT NOT NULL,
+            updated_at TEXT
+        )
+    """)
+
+    # Lightweight schema migration for databases created before section hashes.
+    cursor.execute("PRAGMA table_info(usc_sections)")
+    usc_columns = {row["name"] for row in cursor.fetchall()}
+    if "content_hash" not in usc_columns:
+        cursor.execute("ALTER TABLE usc_sections ADD COLUMN content_hash TEXT")
 
     # Create indexes for USC
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usc_citation ON usc_sections(title, section)")
@@ -226,7 +242,7 @@ async def insert_sections(table: str, sections: list[dict]) -> int:
     # Determine columns based on table
     if table == "usc_sections":
         columns = ["title", "section", "heading", "text", "chapter", "subchapter",
-                   "effective_date", "source_law", "last_updated"]
+                   "content_hash", "effective_date", "source_law", "last_updated"]
         placeholders = ", ".join(["?"] * len(columns))
 
         query = f"""
@@ -243,6 +259,7 @@ async def insert_sections(table: str, sections: list[dict]) -> int:
                 s.get("text"),
                 s.get("chapter"),
                 s.get("subchapter"),
+                s.get("content_hash"),
                 s.get("effective_date"),
                 s.get("source_law"),
                 s.get("last_updated", datetime.now().isoformat())
@@ -280,6 +297,154 @@ async def insert_sections(table: str, sections: list[dict]) -> int:
     inserted_count = cursor.rowcount
     logger.info(f"Inserted {inserted_count} sections into {table}")
     return inserted_count
+
+
+async def clear_sections(table: str) -> int:
+    """
+    Delete all rows from a legal section table.
+
+    Args:
+        table: Table name ('usc_sections' or 'cfr_sections')
+
+    Returns:
+        Number of rows deleted
+    """
+    if table not in ("usc_sections", "cfr_sections"):
+        raise ValueError(f"Invalid table: {table}")
+
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(f"SELECT COUNT(*) as n FROM {table}")
+    deleted_count = cursor.fetchone()["n"]
+
+    cursor.execute(f"DELETE FROM {table}")
+
+    if table == "usc_sections":
+        cursor.execute("DELETE FROM cross_references WHERE source_type = 'usc' OR target_type = 'usc'")
+    elif table == "cfr_sections":
+        cursor.execute("DELETE FROM cross_references WHERE source_type = 'cfr' OR target_type = 'cfr'")
+
+    conn.commit()
+    logger.info(f"Deleted {deleted_count} rows from {table}")
+    return deleted_count
+
+
+async def clear_usc_title(title: str) -> int:
+    """
+    Delete all SQLite USC rows for one title.
+
+    Args:
+        title: USC title number
+
+    Returns:
+        Number of USC section rows deleted
+    """
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) as n FROM usc_sections WHERE title = ?", (title,))
+    deleted_count = cursor.fetchone()["n"]
+
+    cursor.execute("DELETE FROM usc_sections WHERE title = ?", (title,))
+    cursor.execute(
+        """
+        DELETE FROM cross_references
+        WHERE (source_type = 'usc' AND source_id NOT IN (SELECT id FROM usc_sections))
+           OR (target_type = 'usc' AND target_citation LIKE ?)
+        """,
+        (f"{title} USC%",),
+    )
+    conn.commit()
+    logger.info(f"Deleted {deleted_count} USC rows for title {title}")
+    return deleted_count
+
+
+async def get_usc_sections_for_title(title: str) -> dict[str, dict]:
+    """Return existing SQLite USC sections for one title, keyed by section."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM usc_sections WHERE title = ?", (title,))
+    return {row["section"]: dict(row) for row in cursor.fetchall()}
+
+
+async def delete_usc_sections(title: str, sections: list[str]) -> int:
+    """Delete specific USC sections from SQLite."""
+    section_list = list(dict.fromkeys(sections))
+    if not section_list:
+        return 0
+
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.executemany(
+        "DELETE FROM usc_sections WHERE title = ? AND section = ?",
+        [(title, section) for section in section_list],
+    )
+    deleted_count = cursor.rowcount
+    cursor.execute(
+        "DELETE FROM cross_references WHERE source_type = 'usc' AND source_id NOT IN (SELECT id FROM usc_sections)"
+    )
+    conn.commit()
+    logger.info(f"Deleted {deleted_count} specific USC rows for title {title}")
+    return deleted_count
+
+
+async def set_usc_section_hashes(
+    title: str,
+    section_hashes: dict[str, str],
+    release_point: str | None = None,
+) -> int:
+    """Backfill/update content hashes for existing USC sections."""
+    if not section_hashes:
+        return 0
+
+    conn = _get_connection()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+
+    if release_point is None:
+        cursor.executemany(
+            """
+            UPDATE usc_sections
+            SET content_hash = ?, last_updated = ?
+            WHERE title = ? AND section = ?
+            """,
+            [(content_hash, now, title, section) for section, content_hash in section_hashes.items()],
+        )
+    else:
+        cursor.executemany(
+            """
+            UPDATE usc_sections
+            SET content_hash = ?, source_law = ?, last_updated = ?
+            WHERE title = ? AND section = ?
+            """,
+            [
+                (content_hash, release_point, now, title, section)
+                for section, content_hash in section_hashes.items()
+            ],
+        )
+
+    updated_count = cursor.rowcount
+    conn.commit()
+    logger.info(f"Updated {updated_count} USC content hashes for title {title}")
+    return updated_count
+
+
+async def count_usc_sections_missing_content_hash() -> int:
+    """Return count of USC rows without a stored content hash."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT COUNT(*) as n
+        FROM usc_sections
+        WHERE content_hash IS NULL OR content_hash = ''
+        """
+    )
+    return cursor.fetchone()["n"]
 
 
 async def search_fulltext(query: str, table: str = "usc_sections", limit: int = 20) -> list[dict]:
@@ -350,6 +515,60 @@ async def set_metadata(key: str, value: str):
         (key, value, datetime.now().isoformat())
     )
     conn.commit()
+
+
+async def delete_metadata(key: str) -> None:
+    """Delete a metadata key."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM metadata WHERE key = ?", (key,))
+    conn.commit()
+
+
+async def get_usc_title_hashes() -> dict[str, str]:
+    """Return stored USC title XML hashes keyed by title number."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT title, xml_hash FROM usc_title_hashes")
+    return {row["title"]: row["xml_hash"] for row in cursor.fetchall()}
+
+
+async def set_usc_title_hash(title: str, xml_hash: str, release_point: str) -> None:
+    """Store one USC title XML hash."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO usc_title_hashes (title, xml_hash, release_point, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (title, xml_hash, release_point, datetime.now().isoformat()),
+    )
+    conn.commit()
+
+
+async def delete_usc_title_hash(title: str) -> None:
+    """Delete one stored USC title XML hash."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM usc_title_hashes WHERE title = ?", (title,))
+    conn.commit()
+
+
+async def clear_usc_title_hashes() -> int:
+    """Delete all stored USC title XML hashes."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) as n FROM usc_title_hashes")
+    deleted_count = cursor.fetchone()["n"]
+    cursor.execute("DELETE FROM usc_title_hashes")
+    conn.commit()
+    return deleted_count
 
 
 async def get_title_toc(title: str, table: str = "usc_sections") -> dict:

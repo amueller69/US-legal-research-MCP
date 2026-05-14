@@ -6,7 +6,7 @@ Handles:
 - Semantic similarity search
 - Metadata filtering
 
-Reference: /home/alex/Repos/Zotero-MCP-fork/src/zotero_mcp/chroma_client.py
+Reference: Zotero-MCP ChromaDB client pattern.
 """
 
 import logging
@@ -184,6 +184,65 @@ async def delete_documents(ids: list[str]):
         logger.info(f"Deleted {len(ids)} documents from ChromaDB")
     except Exception as e:
         logger.error(f"Error deleting documents: {e}")
+        raise
+
+
+async def delete_documents_by_source(source_type: str) -> int:
+    """
+    Delete all documents for a source type from the collection.
+
+    Args:
+        source_type: Document source type, such as 'usc' or 'cfr'
+
+    Returns:
+        Number of matching document IDs found before deletion
+    """
+    if not source_type:
+        raise ValueError("source_type is required")
+
+    collection = _get_collection()
+    where = {"source_type": source_type}
+
+    try:
+        existing = collection.get(where=where, include=[])
+        deleted_count = len(existing.get("ids", []))
+        if deleted_count:
+            collection.delete(where=where)
+        logger.info(f"Deleted {deleted_count} {source_type} documents from ChromaDB")
+        return deleted_count
+    except Exception as e:
+        logger.error(f"Error deleting {source_type} documents: {e}")
+        raise
+
+
+async def delete_documents_by_source_and_title(source_type: str, title: str) -> int:
+    """
+    Delete all documents for a source type and title from the collection.
+
+    Args:
+        source_type: Document source type, such as 'usc' or 'cfr'
+        title: Title number
+
+    Returns:
+        Number of matching document IDs found before deletion
+    """
+    if not source_type:
+        raise ValueError("source_type is required")
+    if not title:
+        raise ValueError("title is required")
+
+    collection = _get_collection()
+    where = {"$and": [{"source_type": source_type}, {"title": title}]}
+
+    try:
+        existing = collection.get(where=where, include=[])
+        deleted_count = len(existing.get("ids", []))
+        if deleted_count:
+            collection.delete(where=where)
+        logger.info(f"Deleted {deleted_count} {source_type} title {title} documents from ChromaDB")
+        return deleted_count
+    except Exception as e:
+        logger.error(f"Error deleting {source_type} title {title} documents: {e}")
         raise
 
 

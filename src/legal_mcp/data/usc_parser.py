@@ -4,7 +4,9 @@ Data source: https://uscode.house.gov/download/download.shtml
 Format: XML with USLM (United States Legislative Markup) schema
 """
 
+import hashlib
 import re
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -18,6 +20,63 @@ from bs4 import BeautifulSoup
 # Download URL and local cache
 DOWNLOAD_PAGE = "https://uscode.house.gov/download/download.shtml"
 CACHE_DIR = Path.home() / ".cache" / "legal-mcp" / "usc-xml"
+
+
+def get_usc_release_cache_dir(
+    release_point: str,
+    cache_dir: Path | None = None,
+) -> Path:
+    """Return the cache directory path used for a USC release point."""
+    cache_dir = cache_dir or CACHE_DIR
+    release_match = re.search(r'Public Law (\d+-\d+)', release_point)
+    if release_match:
+        release_dir_name = release_match.group(1)
+    else:
+        release_dir_name = re.sub(r'[^\w\-]', '_', release_point)
+    return cache_dir / release_dir_name
+
+
+def prune_usc_xml_cache(
+    current_xml_dir: Path,
+    cache_dir: Path | None = None,
+) -> list[Path]:
+    """
+    Remove stale USC XML cache entries, keeping only the current release directory.
+
+    The ZIP download is normally temporary, but this also deletes any direct
+    stale .zip files under the USC cache root.
+    """
+    cache_dir = (cache_dir or CACHE_DIR).resolve()
+    current_xml_dir = current_xml_dir.resolve()
+
+    if not current_xml_dir.exists():
+        return []
+
+    try:
+        current_xml_dir.relative_to(cache_dir)
+    except ValueError as exc:
+        raise ValueError(f"Refusing to prune outside USC cache: {current_xml_dir}") from exc
+
+    removed: list[Path] = []
+    if not cache_dir.exists():
+        return removed
+
+    for child in cache_dir.iterdir():
+        child_path = child.resolve()
+        if child_path == current_xml_dir:
+            continue
+
+        if child.is_symlink():
+            child.unlink()
+            removed.append(child)
+        elif child.is_dir():
+            shutil.rmtree(child)
+            removed.append(child)
+        elif child.is_file() and child.suffix.lower() == ".zip":
+            child.unlink()
+            removed.append(child)
+
+    return removed
 
 
 def get_current_usc_release() -> tuple[str, str]:
@@ -131,17 +190,9 @@ async def download_usc_xml(
     sys.stderr.write("Checking USC download page...\n")
     release_point, bulk_xml_url = get_current_usc_release()
 
-    # Sanitize release point for directory name
-    # "Public Law 119-84 (04/18/2026)" -> "119-84"
-    release_match = re.search(r'Public Law (\d+-\d+)', release_point)
-    if release_match:
-        release_dir_name = release_match.group(1)
-    else:
-        # Fallback: use full release point, sanitized
-        release_dir_name = re.sub(r'[^\w\-]', '_', release_point)
-
     # Check cache - only extracted XML is persistent
-    xml_dir = cache_dir / release_dir_name
+    xml_dir = get_usc_release_cache_dir(release_point, cache_dir=cache_dir)
+    release_dir_name = xml_dir.name
 
     if xml_dir.exists() and not force:
         # Check if directory has XML files
@@ -225,13 +276,78 @@ async def download_usc_xml(
             raise ValueError(f"Failed to extract USC XML: {e}")
 
 
-def parse_usc_xml(xml_dir: Path, limit: int | None = None) -> Iterator[dict]:
+def get_usc_title_xml_files(xml_dir: Path) -> dict[str, Path]:
+    """Return USC title XML files keyed by title number."""
+    from lxml import etree
+
+    ns = {'uslm': 'http://xml.house.gov/schemas/uslm/1.0'}
+    title_files: dict[str, Path] = {}
+
+    xml_files = sorted(xml_dir.glob("*.xml"))
+    if not xml_files:
+        raise ValueError(f"No XML files found in {xml_dir}")
+
+    for xml_file in xml_files:
+        try:
+            tree = etree.parse(str(xml_file))
+            root = tree.getroot()
+            title_elem = root.find('.//uslm:title', ns)
+            if title_elem is None:
+                continue
+
+            title_num_elem = title_elem.find('./uslm:num', ns)
+            if title_num_elem is None or not title_num_elem.get('value'):
+                continue
+
+            title_files[title_num_elem.get('value')] = xml_file
+        except Exception as e:
+            sys.stderr.write(f"[WARN] Error reading title from {xml_file.name}: {e}\n")
+
+    return title_files
+
+
+def get_usc_title_hashes(xml_dir: Path) -> dict[str, str]:
+    """Return SHA-256 hashes for USC title XML files keyed by title number."""
+    title_files = get_usc_title_xml_files(xml_dir)
+    hashes = {}
+    for title, xml_file in title_files.items():
+        file_hash = hashlib.sha256()
+        with xml_file.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                file_hash.update(chunk)
+        hashes[title] = file_hash.hexdigest()
+    return hashes
+
+
+def get_usc_section_document(section: dict) -> str:
+    """Return the text payload used for USC semantic indexing."""
+    parts = [p for p in [section.get("heading"), section.get("text"), section.get("notes")] if p]
+    return "\n\n".join(parts) or section.get("heading", "")
+
+
+def normalize_usc_section_document(document: str) -> str:
+    """Normalize indexed USC text before content hashing."""
+    return re.sub(r"\s+", " ", document).strip()
+
+
+def get_usc_section_content_hash(section: dict) -> str:
+    """Return a stable hash of the normalized text used for USC indexing."""
+    document = normalize_usc_section_document(get_usc_section_document(section))
+    return hashlib.sha256(document.encode("utf-8")).hexdigest()
+
+
+def parse_usc_xml(
+    xml_dir: Path,
+    limit: int | None = None,
+    titles: set[str] | None = None,
+) -> Iterator[dict]:
     """
     Parse USC XML files into structured sections.
 
     Args:
         xml_dir: Directory containing USC XML files
         limit: Maximum number of sections to parse (for testing)
+        titles: Optional title numbers to parse
 
     Yields:
         Section dicts with structure:
@@ -250,7 +366,11 @@ def parse_usc_xml(xml_dir: Path, limit: int | None = None) -> Iterator[dict]:
     ns = {'uslm': 'http://xml.house.gov/schemas/uslm/1.0'}
 
     # Find all XML files
-    xml_files = sorted(xml_dir.glob("*.xml"))
+    if titles is not None:
+        title_files = get_usc_title_xml_files(xml_dir)
+        xml_files = [title_files[t] for t in sorted(titles) if t in title_files]
+    else:
+        xml_files = sorted(xml_dir.glob("*.xml"))
     if not xml_files:
         raise ValueError(f"No XML files found in {xml_dir}")
 

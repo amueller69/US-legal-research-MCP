@@ -1,6 +1,6 @@
 # Storage Layer Implementation Summary
 
-**Date:** 2026-04-22  
+**Date:** 2026-04-22 (updated 2026-04-26)
 **Status:** ✅ Complete and Tested
 
 ## What Was Implemented
@@ -9,12 +9,14 @@
 
 **Features:**
 - ✅ Complete schema implementation matching LEGAL_MCP_MASTER_PLAN.md
-- ✅ Tables: usc_sections, cfr_sections, public_laws, cross_references, metadata
+- ✅ Tables: usc_sections, cfr_sections, public_laws, cross_references, metadata, usc_title_hashes
 - ✅ FTS5 full-text search virtual tables for USC and CFR
 - ✅ Auto-sync triggers to keep FTS tables current
 - ✅ Indexes for fast citation lookups (<100ms target)
 - ✅ CRUD operations: insert_sections, get_section, search_fulltext
 - ✅ Metadata management: get_metadata, set_metadata
+- ✅ USC clean rebuild helpers: clear_sections, clear_usc_title
+- ✅ USC title-level XML hash tracking plus section content hashes for incremental updates
 - ✅ Table of contents generation: get_title_toc
 
 **Key Functions:**
@@ -22,9 +24,19 @@
 await initialize()                      # Create schema and tables
 await get_section(table, title, section)  # Retrieve by citation
 await insert_sections(table, sections)   # Bulk insert/update
+await clear_sections(table)             # Delete all USC/CFR section rows
+await clear_usc_title(title)             # Delete one USC title from SQLite
 await search_fulltext(query, table)     # FTS5 search
 await get_metadata(key)                 # Get metadata
 await set_metadata(key, value)          # Set metadata
+await delete_metadata(key)              # Delete metadata
+await get_usc_title_hashes()            # Stored title XML hashes
+await set_usc_title_hash(title, hash, release_point)
+await delete_usc_title_hash(title)
+await clear_usc_title_hashes()
+await get_usc_sections_for_title(title) # Existing sections keyed by section number
+await set_usc_section_hashes(title, hashes, release_point)
+await count_usc_sections_missing_content_hash()
 await get_title_toc(title)              # Get table of contents
 ```
 
@@ -38,6 +50,7 @@ await get_title_toc(title)              # Get table of contents
 - ✅ Semantic similarity search with metadata filtering
 - ✅ Token-aware text truncation (8000 token default)
 - ✅ Document upsert (insert/update)
+- ✅ Targeted delete by source type and USC title
 - ✅ Collection management and statistics
 
 **Key Functions:**
@@ -46,9 +59,14 @@ await initialize()                           # Setup ChromaDB client
 await upsert_documents(docs, metadata, ids)  # Add/update documents
 await search(query, n_results, where)        # Semantic search
 await delete_documents(ids)                  # Remove documents
+await delete_documents_by_source("usc")      # Remove all USC vectors
+await delete_documents_by_source_and_title("usc", "42")  # Remove one title
 await get_collection_info()                  # Get stats
 await reset_collection()                     # Clear collection
+get_existing_ids(ids)                        # Return subset of ids already in collection (sync)
 ```
+
+`get_existing_ids()` is still available for batch-level add/update accounting. Normal USC release updates now avoid unnecessary embedding work through a two-stage comparison: unchanged title XML files are skipped entirely, while changed title XML files are parsed and compared by normalized section content hash before any ChromaDB embedding work runs.
 
 **Storage Location:** `~/.config/legal-mcp/chroma_db/`
 
@@ -101,6 +119,49 @@ from legal_mcp.storage import (
 3. **Hybrid Queries:** Tools can use both (exact lookup + related sections)
 4. **No External Dependencies:** Everything runs locally, no API costs
 
+### USC Update Strategy
+
+USC update behavior has two modes:
+
+| Mode | Trigger | Behavior |
+|------|---------|----------|
+| **Clean full rebuild** | `legal-mcp setup --force` or `legal-mcp update-db --force` | Clear all USC rows from SQLite, delete all ChromaDB docs with `source_type="usc"`, clear USC title hashes/metadata, then rebuild from the current XML release. |
+| **Incremental update** | `legal-mcp update-db` when house.gov release point changes | Download/use cached XML, compute SHA-256 per USC title XML file as a coarse change detector, then parse changed/new titles and compare normalized per-section content hashes. Only new/changed sections are embedded. Removed sections/titles are deleted. Hashes and release metadata are updated after successful indexing. |
+
+Hash storage:
+
+```sql
+CREATE TABLE usc_title_hashes (
+    title TEXT PRIMARY KEY,
+    xml_hash TEXT NOT NULL,
+    release_point TEXT NOT NULL,
+    updated_at TEXT
+);
+```
+
+`usc_sections.content_hash` stores a SHA-256 hash of the same normalized text payload sent to ChromaDB: section heading, section text, and parser-extracted notes. Raw XML-only churn such as generated IDs, timestamps, publication labels, and whitespace does not force re-embedding unless it changes that indexed section content.
+
+Normal incremental update flow:
+
+1. Check the house.gov USC release point against `metadata.usc_release_point`.
+2. If unchanged, no indexing is needed. If title XML hashes or section content hashes are missing for an existing database, backfill them from cached XML without re-embedding.
+3. If changed, download or reuse cached XML under `~/.cache/legal-mcp/usc-xml/<release>/`.
+4. Compute SHA-256 hashes for each title XML file.
+5. Compare against `usc_title_hashes`.
+6. For unchanged titles, skip SQLite and ChromaDB work entirely.
+7. For changed/new titles, parse the title once and compute normalized section content hashes.
+8. For unchanged sections inside changed XML titles, update hash/release metadata only.
+9. For new or changed sections, upsert SQLite rows and ChromaDB documents.
+10. For removed sections/titles, delete SQLite rows, ChromaDB docs, and stale title hashes.
+11. Write title hashes and release metadata only after indexing completes without errors.
+
+Metadata safety rules:
+
+- `--force` clears `usc_release_point`, `last_usc_update`, and all title hashes before rebuilding.
+- Release metadata and title hashes are not updated if indexing reports errors.
+- Release metadata and title hashes are not updated when `--limit` is used, because that creates a partial test index.
+- Successful non-limited setup/update runs prune stale USC XML cache directories after metadata is safely updated, keeping the current release cache under `~/.cache/legal-mcp/usc-xml/<release>/`.
+
 ## Implementation Patterns from Zotero-MCP
 
 ✅ Borrowed successfully:
@@ -115,62 +176,7 @@ from legal_mcp.storage import (
 - FTS5 for legal text search
 - Chapter/title hierarchy
 - Cross-reference tracking
-
-## Next Steps
-
-According to LEGAL_MCP_MASTER_PLAN.md, the implementation order is:
-
-### ✅ Phase 1: Storage Layer (COMPLETE)
-- ✅ `storage/sqlite_db.py` - Schema, CRUD, FTS
-- ✅ `storage/chroma_client.py` - Vector search
-- ✅ Tests passing
-
-### 🚧 Phase 2: Data Ingestion (NEXT)
-
-**Priority Order:**
-1. **USC Parser** (`data/usc_parser.py`)
-   - Download bulk XML from house.gov
-   - Parse USLM XML structure
-   - Extract: title, chapter, section, heading, text
-   - Store in SQLite + generate embeddings for ChromaDB
-
-2. **CFR Client** (`data/cfr_client.py`)
-   - Fetch sections via eCFR API
-   - Cache responses (CFR updates daily)
-   - Store structured data
-
-3. **GovInfo Wrapper** (`data/govinfo_wrapper.py`)
-   - Integrate with GovInfo MCP
-   - Search bills and session laws
-   - Link to USC sections
-
-### Phase 3: Tool Implementations
-
-Fill in the tool function bodies in `tools/*.py`:
-- Tools already have complete signatures
-- Just need to call storage layer functions
-- Pattern:
-  ```python
-  @mcp.tool(readOnlyHint=True)
-  async def get_usc_section(title: str, section: str) -> dict:
-      from legal_mcp.storage import get_section
-      result = await get_section("usc_sections", title, section)
-      if not result:
-          return {"error": f"Section not found: {title} USC § {section}"}
-      return {
-          "citation": f"{title} USC § {section}",
-          "heading": result["heading"],
-          "text": result["text"],
-          ...
-      }
-  ```
-
-### Phase 4: CLI Commands
-
-Implement CLI functions in `cli.py`:
-- `legal-mcp setup` - Configure embedding model, download USC XML
-- `legal-mcp update-db` - Run USC parser, update databases
-- `legal-mcp db-status` - Show database statistics
+- Title-level USC XML hashes plus normalized section content hashes to avoid re-embedding unchanged USC sections
 
 ## Testing the Storage Layer
 
@@ -227,6 +233,11 @@ results = await search_fulltext("civil rights", "usc_sections")
 
 # Semantic search
 results = await search_semantic("qualified immunity for police", n_results=10)
+
+# Clean one USC title for title-level incremental rebuild
+await clear_usc_title("42")
+await delete_documents_by_source_and_title("usc", "42")
+await set_usc_title_hash("42", xml_hash, "Public Law 119-84 (04/18/2026)")
 ```
 
 ## Performance Characteristics
@@ -241,19 +252,19 @@ results = await search_semantic("qualified immunity for police", n_results=10)
 ## Files Modified
 
 ```
-legal-mcp/
+US-legal-research-MCP/
 ├── src/legal_mcp/storage/
 │   ├── __init__.py           ✅ Updated (exports)
-│   ├── sqlite_db.py          ✅ Implemented (394 lines)
-│   └── chroma_client.py      ✅ Implemented (279 lines)
+│   ├── sqlite_db.py          ✅ Implemented
+│   └── chroma_client.py      ✅ Implemented
 ├── tests/
-│   └── test_storage.py       ✅ Created (205 lines)
+│   └── test_storage.py       ✅ Created (6 tests passing)
 └── STORAGE_IMPLEMENTATION.md ✅ This file
 ```
 
 ## References
 
-- **Master Plan:** `/home/alex/Repos/LEGAL_MCP_MASTER_PLAN.md`
-- **Zotero-MCP Reference:** `/home/alex/Repos/Zotero-MCP-fork/src/zotero_mcp/`
+- **Master Plan:** `LEGAL_MCP_MASTER_PLAN.md`
+- **Zotero-MCP Reference:** Zotero-MCP ChromaDB/storage patterns used during development
 - **SQLite Schema:** LEGAL_MCP_MASTER_PLAN.md Section 5.1
 - **ChromaDB Schema:** LEGAL_MCP_MASTER_PLAN.md Section 5.1 (ChromaDB Schema)

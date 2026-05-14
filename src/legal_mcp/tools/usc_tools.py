@@ -1,11 +1,11 @@
 """US Code tools - citation lookup and navigation."""
 
-from mcp import tool
+from legal_mcp._app import mcp
 
 
-@tool(
-    readOnlyHint=True,
-    description="Retrieve a specific US Code section by citation"
+@mcp.tool(
+    description="Retrieve a specific US Code section by citation",
+    annotations={"readOnlyHint": True},
 )
 async def get_usc_section(title: str, section: str) -> dict:
     """
@@ -29,16 +29,26 @@ async def get_usc_section(title: str, section: str) -> dict:
         - get_usc_section(title="42", section="1983")
         - get_usc_section(title="18", section="242")
     """
-    # TODO: Implement USC section lookup
-    # 1. Query sqlite_db.get_section(table="usc_sections", title=title, section=section)
-    # 2. Format and return result
-    # 3. Handle errors (section not found, invalid citation)
-    raise NotImplementedError("USC section lookup not yet implemented")
+    from legal_mcp.storage import sqlite_db
+
+    result = await sqlite_db.get_section("usc_sections", title, section)
+    if not result:
+        return {"error": f"Section not found: {title} USC § {section}"}
+
+    return {
+        "citation": f"{title} USC § {section}",
+        "heading": result.get("heading"),
+        "text": result.get("text"),
+        "chapter": result.get("chapter"),
+        "subchapter": result.get("subchapter"),
+        "effective_date": result.get("effective_date"),
+        "source_law": result.get("source_law"),
+    }
 
 
-@tool(
-    readOnlyHint=True,
-    description="Get table of contents for a US Code title"
+@mcp.tool(
+    description="Get table of contents for a US Code title",
+    annotations={"readOnlyHint": True},
 )
 async def get_title_toc(title: str) -> dict:
     """
@@ -50,12 +60,13 @@ async def get_title_toc(title: str) -> dict:
     Returns:
         {
             "title": "42",
-            "name": "The Public Health and Welfare",
             "chapters": [
                 {
                     "number": "21",
-                    "name": "Civil Rights",
-                    "sections": ["1981", "1982", "1983", ...]
+                    "sections": [
+                        {"number": "1981", "heading": "..."},
+                        ...
+                    ]
                 },
                 ...
             ]
@@ -65,8 +76,10 @@ async def get_title_toc(title: str) -> dict:
         - get_title_toc(title="42")
         - get_title_toc(title="26")
     """
-    # TODO: Implement TOC generation
-    # 1. Query sqlite for all sections in title
-    # 2. Group by chapter
-    # 3. Build hierarchical structure
-    raise NotImplementedError("USC TOC not yet implemented")
+    from legal_mcp.storage import sqlite_db
+
+    result = await sqlite_db.get_title_toc(title)
+    if not result["chapters"]:
+        return {"error": f"Title {title} not found in database"}
+
+    return result
