@@ -336,6 +336,126 @@ def get_usc_section_content_hash(section: dict) -> str:
     return hashlib.sha256(document.encode("utf-8")).hexdigest()
 
 
+def _local_name(element) -> str:
+    """Return an XML element's local tag name without its namespace."""
+    return element.tag.rsplit('}', 1)[-1] if '}' in element.tag else element.tag
+
+
+def _normalized_element_text(element) -> str:
+    """Return normalized recursive text for one XML element."""
+    return re.sub(r"\s+", " ", ''.join(element.itertext())).strip()
+
+
+def _extract_heading_text(heading_elem) -> str:
+    """Extract a heading, including text from nested refs/dates/inline nodes."""
+    if heading_elem is None:
+        return ""
+    return _normalized_element_text(heading_elem)
+
+
+def _extract_content_text(content_elem, ns: dict[str, str]) -> list[str]:
+    """Extract text from a USLM content block without assuming <p> wrappers."""
+    paragraphs = content_elem.findall('.//uslm:p', ns)
+    if paragraphs:
+        return [
+            paragraph_text
+            for p_elem in paragraphs
+            if (paragraph_text := _normalized_element_text(p_elem))
+        ]
+
+    content_text = _normalized_element_text(content_elem)
+    return [content_text] if content_text else []
+
+
+def _extract_usc_body_text(section_elem, ns: dict[str, str]) -> str:
+    """
+    Extract codified USC section body text while excluding notes/source credits.
+
+    USLM sections often store operative text under nested subsection,
+    paragraph, subparagraph, clause, and chapeau/content nodes rather than a
+    direct <section><content><p> shape. This walks the body tree in document
+    order, but deliberately skips notes and sourceCredit so editorial and
+    uncodified note material stay on their separate parser path.
+    """
+    skipped = {"notes", "sourceCredit"}
+    text_parts: list[str] = []
+
+    def walk_body(element, include_label: bool) -> None:
+        name = _local_name(element)
+        if name in skipped:
+            return
+
+        line_parts: list[str] = []
+        if include_label:
+            num_elem = element.find('./uslm:num', ns)
+            heading_elem = element.find('./uslm:heading', ns)
+
+            if num_elem is not None:
+                num_text = _normalized_element_text(num_elem)
+                if num_text:
+                    line_parts.append(num_text)
+
+            heading = _extract_heading_text(heading_elem)
+            if heading:
+                line_parts.append(heading)
+
+        if line_parts:
+            text_parts.append(" ".join(line_parts))
+
+        for child in element:
+            child_name = _local_name(child)
+            if child_name in skipped or child_name in {"num", "heading"}:
+                continue
+
+            if child_name == "chapeau":
+                chapeau_text = _normalized_element_text(child)
+                if chapeau_text:
+                    text_parts.append(chapeau_text)
+                continue
+
+            if child_name == "continuation":
+                continuation_text = _normalized_element_text(child)
+                if continuation_text:
+                    text_parts.append(continuation_text)
+                continue
+
+            if child_name == "content":
+                text_parts.extend(_extract_content_text(child, ns))
+                continue
+
+            if child_name == "p":
+                paragraph_text = _normalized_element_text(child)
+                if paragraph_text:
+                    text_parts.append(paragraph_text)
+                continue
+
+            walk_body(child, include_label=True)
+
+    for child in section_elem:
+        child_name = _local_name(child)
+        if child_name in skipped or child_name in {"num", "heading"}:
+            continue
+
+        if child_name == "content":
+            text_parts.extend(_extract_content_text(child, ns))
+        elif child_name == "chapeau":
+            chapeau_text = _normalized_element_text(child)
+            if chapeau_text:
+                text_parts.append(chapeau_text)
+        elif child_name == "continuation":
+            continuation_text = _normalized_element_text(child)
+            if continuation_text:
+                text_parts.append(continuation_text)
+        elif child_name == "p":
+            paragraph_text = _normalized_element_text(child)
+            if paragraph_text:
+                text_parts.append(paragraph_text)
+        else:
+            walk_body(child, include_label=True)
+
+    return '\n\n'.join(text_parts)
+
+
 def parse_usc_xml(
     xml_dir: Path,
     limit: int | None = None,
@@ -402,6 +522,9 @@ def parse_usc_xml(
             file_section_count = 0
 
             for section_elem in sections:
+                if section_elem.xpath('ancestor::uslm:notes or ancestor::uslm:note', namespaces=ns):
+                    continue
+
                 # Extract section number
                 num_elem = section_elem.find('./uslm:num', ns)
                 if num_elem is None or not num_elem.get('value'):
@@ -411,20 +534,9 @@ def parse_usc_xml(
 
                 # Extract heading
                 heading_elem = section_elem.find('./uslm:heading', ns)
-                heading = heading_elem.text.strip() if heading_elem is not None and heading_elem.text else ""
+                heading = _extract_heading_text(heading_elem)
 
-                # Extract text content from <content><p> elements
-                content_elem = section_elem.find('./uslm:content', ns)
-                text_parts = []
-                if content_elem is not None:
-                    # Get all <p> elements
-                    for p_elem in content_elem.findall('.//uslm:p', ns):
-                        # Get all text including nested elements
-                        p_text = ''.join(p_elem.itertext())
-                        if p_text.strip():
-                            text_parts.append(p_text.strip())
-
-                text = '\n\n'.join(text_parts)
+                text = _extract_usc_body_text(section_elem, ns)
 
                 # Extract miscellaneous notes (substantive statutory provisions)
                 notes_parts = []

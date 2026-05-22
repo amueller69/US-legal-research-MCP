@@ -64,13 +64,19 @@ To check for a newer US Code release later:
 legal-mcp update-db
 ```
 
-To force a clean rebuild:
+To rebuild SQLite and ChromaDB from the cached USC XML release without downloading:
+
+```bash
+legal-mcp update-db --rebuild
+```
+
+To force a clean refresh from house.gov:
 
 ```bash
 legal-mcp update-db --force
 ```
 
-`--force` clears existing USC rows/vectors and rebuilds from the current release.
+`update-db` downloads new USC XML only when the current release has changed, then updates changed sections without overwriting everything. `update-db --rebuild` clears and rebuilds USC rows/vectors from the cached XML release. `update-db --force` re-downloads the current release, clears existing USC rows/vectors, and rewrites the databases.
 
 ## Update Behavior
 
@@ -128,6 +134,7 @@ Show the table of contents for title 42
 legal-mcp --help
 legal-mcp setup
 legal-mcp update-db
+legal-mcp update-db --rebuild
 legal-mcp update-db --force
 legal-mcp db-status
 legal-mcp serve --transport stdio

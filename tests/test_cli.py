@@ -35,8 +35,8 @@ def run_cli(*args: str, home: Path | None = None, timeout: int = 30) -> subproce
     ("args", "expected"),
     [
         (("--help",), "db-status"),
-        (("setup", "--help"), "--force"),
-        (("update-db", "--help"), "--limit"),
+        (("setup", "--help"), "--limit"),
+        (("update-db", "--help"), "--rebuild"),
         (("serve", "--help"), "streamable-http"),
     ],
 )
@@ -46,6 +46,13 @@ def test_cli_help_commands(args: tuple[str, ...], expected: str):
     assert result.returncode == 0
     assert "usage:" in result.stdout
     assert expected in result.stdout
+
+
+def test_setup_help_does_not_expose_force():
+    result = run_cli("setup", "--help")
+
+    assert result.returncode == 0
+    assert "--force" not in result.stdout
 
 
 def test_cli_db_status_uses_temp_home(tmp_path: Path):

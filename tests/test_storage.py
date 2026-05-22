@@ -98,6 +98,31 @@ async def test_sqlite_insert_and_retrieve(temp_config_dir):
 
 
 @pytest.mark.asyncio
+async def test_sqlite_usc_lookup_normalizes_section_dashes(temp_config_dir):
+    """USC lookups should accept regular hyphens for sections stored with en dashes."""
+    await initialize_sqlite()
+
+    await insert_sections(
+        "usc_sections",
+        [
+            {
+                "title": "42",
+                "section": "299b–21",
+                "heading": "Definitions",
+                "text": "The term patient safety work product means...",
+                "chapter": "6A",
+            }
+        ],
+    )
+
+    section = await get_section("usc_sections", "42", "299b-21")
+
+    assert section is not None
+    assert section["section"] == "299b–21"
+    assert section["citation"] == "42 USC § 299b–21"
+
+
+@pytest.mark.asyncio
 async def test_sqlite_fulltext_search(temp_config_dir):
     """Test full-text search."""
     await initialize_sqlite()

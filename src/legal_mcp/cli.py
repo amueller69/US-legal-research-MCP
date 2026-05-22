@@ -3,7 +3,7 @@ Legal MCP CLI - Command-line interface for setup and maintenance.
 
 Commands:
     legal-mcp setup       - Download USC XML and populate databases
-    legal-mcp update-db   - Check for updates and rebuild if needed
+    legal-mcp update-db   - Check for updates and update changed sections
     legal-mcp db-status   - Show database status
     legal-mcp serve       - Start MCP server (usually called by MCP client)
 
@@ -21,7 +21,6 @@ def _usc_doc_id(section: dict) -> str:
 
 async def _update_database(
     xml_dir,
-    release_point: str,
     force_rebuild: bool = False,
     limit: int | None = None,
     titles: set[str] | None = None,
@@ -38,7 +37,6 @@ async def _update_database(
 
     Args:
         xml_dir: Path to directory containing USC XML files
-        release_point: Release point string (e.g., "Public Law 119-84 (04/18/2026)")
         force_rebuild: If True, skip incremental check and re-embed everything
         limit: Cap number of sections (for testing)
         titles: Optional USC title numbers to parse/index
@@ -116,7 +114,6 @@ async def _update_database(
         nonlocal failed_batches
 
         for s in sections:
-            s.setdefault("source_law", release_point)
             s.setdefault("last_updated", now)
             s.setdefault("content_hash", get_usc_section_content_hash(s))
 
@@ -237,7 +234,6 @@ async def _update_database(
 
 async def _backfill_usc_section_content_hashes(
     xml_dir,
-    release_point: str,
     titles: set[str] | None = None,
 ) -> int:
     from legal_mcp.data.usc_parser import get_usc_section_content_hash, parse_usc_xml
@@ -251,7 +247,7 @@ async def _backfill_usc_section_content_hashes(
 
     updated_count = 0
     for title, section_hashes in hashes_by_title.items():
-        updated_count += await set_usc_section_hashes(title, section_hashes, release_point)
+        updated_count += await set_usc_section_hashes(title, section_hashes)
     return updated_count
 
 
@@ -292,7 +288,7 @@ async def _run_setup(force: bool = False, limit: int | None = None):
     stored_release = await get_metadata("usc_release_point")
     if stored_release and not force:
         print(f"\nUSC already loaded: {stored_release}")
-        print("Run with --force to re-download and rebuild.")
+        print("Run 'legal-mcp update-db' to check for updates or 'legal-mcp update-db --rebuild' to rebuild from cache.")
         return
 
     print("\nFetching USC XML from house.gov...")
@@ -318,7 +314,7 @@ async def _run_setup(force: bool = False, limit: int | None = None):
                 print(f"\nSkipping {len(unchanged)} unchanged USC title(s) based on XML hashes.")
 
     print("\nParsing and indexing USC sections (this will take a while)...")
-    stats = await _update_database(xml_dir, release_point, force_rebuild=force, limit=limit)
+    stats = await _update_database(xml_dir, force_rebuild=force, limit=limit)
 
     print(f"\nIndexing complete:")
     print(f"  Total sections: {stats['total']:,}")
@@ -346,7 +342,7 @@ async def _run_setup(force: bool = False, limit: int | None = None):
     print("Setup complete.")
 
 
-async def _run_update_db(force: bool = False, limit: int | None = None):
+async def _run_update_db(force: bool = False, rebuild: bool = False, limit: int | None = None):
     from datetime import datetime
 
     from legal_mcp.storage import (
@@ -377,11 +373,18 @@ async def _run_update_db(force: bool = False, limit: int | None = None):
     await initialize_sqlite()
     await initialize_chroma()
 
+    if force and rebuild:
+        raise ValueError("Use either --force or --rebuild, not both.")
+
+    if rebuild:
+        await _run_rebuild_db(limit=limit)
+        return
+
     stored_release = await get_metadata("usc_release_point")
     has_update, current_release, stored = check_for_updates(stored_release)
 
     if force:
-        print("Force rebuild requested.")
+        print("Force refresh requested: downloading current USC XML, clearing USC data, and rebuilding.")
         await _run_setup(force=True, limit=limit)
         return
 
@@ -404,7 +407,7 @@ async def _run_update_db(force: bool = False, limit: int | None = None):
             print(f"USC is up to date: {stored_release}")
             print(f"Backfilling {missing_content_hashes:,} USC section content hash(es)...")
             xml_dir, release_point = await download_usc_xml(force=False)
-            updated_count = await _backfill_usc_section_content_hashes(xml_dir, release_point)
+            updated_count = await _backfill_usc_section_content_hashes(xml_dir)
             print(f"  Stored {updated_count:,} section content hash(es).")
             return
 
@@ -507,7 +510,7 @@ async def _run_update_db(force: bool = False, limit: int | None = None):
                 total_removed_sections += sqlite_deleted
 
             if unchanged_hashes:
-                await set_usc_section_hashes(title, unchanged_hashes, release_point)
+                await set_usc_section_hashes(title, unchanged_hashes)
                 total_unchanged_sections += len(unchanged_hashes)
 
             sections_to_index.extend(new_sections)
@@ -533,7 +536,6 @@ async def _run_update_db(force: bool = False, limit: int | None = None):
             print("\nIndexing new/changed USC sections...")
             stats = await _update_database(
                 xml_dir,
-                release_point,
                 force_rebuild=False,
                 sections=sections_to_index,
             )
@@ -574,6 +576,90 @@ async def _run_update_db(force: bool = False, limit: int | None = None):
     await set_metadata("last_usc_update", datetime.now().isoformat())
     _prune_usc_xml_cache(xml_dir)
     print(f"\nSaved metadata. Release: {release_point}")
+
+
+async def _run_rebuild_db(limit: int | None = None):
+    from datetime import datetime
+
+    from legal_mcp.storage import (
+        clear_sections,
+        clear_usc_title_hashes,
+        delete_metadata,
+        delete_documents_by_source,
+        get_metadata,
+        initialize_chroma,
+        initialize_sqlite,
+        set_metadata,
+        set_usc_title_hash,
+    )
+    from legal_mcp.data.usc_parser import (
+        get_usc_release_cache_dir,
+        get_usc_title_hashes as compute_title_hashes,
+    )
+
+    print("Legal MCP Rebuild")
+    print("=" * 50)
+
+    print("\nInitializing databases...")
+    await initialize_sqlite()
+    await initialize_chroma()
+    print("  SQLite:   OK")
+    print("  ChromaDB: OK")
+
+    release_point = await get_metadata("usc_release_point")
+    if not release_point:
+        raise RuntimeError("USC release metadata is missing. Run 'legal-mcp setup' or 'legal-mcp update-db' first.")
+
+    xml_dir = get_usc_release_cache_dir(release_point)
+    xml_files = list(xml_dir.glob("**/*.xml")) if xml_dir.exists() else []
+    if not xml_files:
+        raise RuntimeError(
+            f"Cached USC XML not found for {release_point} at {xml_dir}. "
+            "Run 'legal-mcp update-db' to download the current release."
+        )
+
+    print("\nUsing cached USC XML:")
+    print(f"  Release: {release_point}")
+    print(f"  Cache:   {xml_dir}")
+    print(f"  Files:   {len(xml_files)} XML files")
+
+    title_hashes = compute_title_hashes(xml_dir)
+
+    print("\nClearing existing USC data...")
+    sqlite_deleted = await clear_sections("usc_sections")
+    chroma_deleted = await delete_documents_by_source("usc")
+    await clear_usc_title_hashes()
+    await delete_metadata("usc_release_point")
+    await delete_metadata("last_usc_update")
+    print(f"  SQLite USC sections: {sqlite_deleted:,} deleted")
+    print(f"  ChromaDB USC docs:   {chroma_deleted:,} deleted")
+
+    print("\nParsing and indexing USC sections from cache (this will take a while)...")
+    stats = await _update_database(xml_dir, force_rebuild=True, limit=limit)
+
+    print(f"\nIndexing complete:")
+    print(f"  Total sections: {stats['total']:,}")
+    print(f"  Added:          {stats['added']:,}")
+    print(f"  Updated:        {stats['updated']:,}")
+    print(f"  Skipped:        {stats['skipped']:,}")
+    print(f"  Errors:         {stats['errors']:,}")
+    print(f"  Duration:       {stats['duration']}")
+
+    if stats["errors"]:
+        raise RuntimeError(
+            f"USC rebuild completed with {stats['errors']:,} error(s); metadata was not updated."
+        )
+
+    if limit is not None:
+        print("\nLimit was used for testing; release metadata and title hashes were not updated.")
+        return
+
+    await set_metadata("usc_release_point", release_point)
+    await set_metadata("last_usc_update", datetime.now().isoformat())
+    for title, xml_hash in title_hashes.items():
+        await set_usc_title_hash(title, xml_hash, release_point)
+    print(f"\nSaved metadata. Release: {release_point}")
+    print("Rebuild complete.")
 
 
 async def _run_db_status():
@@ -619,6 +705,7 @@ def update_db(args):
     import asyncio
     asyncio.run(_run_update_db(
         force=args.force,
+        rebuild=args.rebuild,
         limit=getattr(args, "limit", None),
     ))
 
@@ -647,12 +734,20 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
-    setup_parser = subparsers.add_parser("setup", help="Download USC XML and populate databases")
-    setup_parser.add_argument("--force", action="store_true", help="Force re-download and rebuild")
+    setup_parser = subparsers.add_parser("setup", help="Download USC XML and populate empty databases")
     setup_parser.add_argument("--limit", type=int, help="Cap sections for testing (e.g. --limit 1000)")
 
-    update_parser = subparsers.add_parser("update-db", help="Check for updates and rebuild if needed")
-    update_parser.add_argument("--force", action="store_true", help="Force rebuild even if up to date")
+    update_parser = subparsers.add_parser("update-db", help="Download updates and index changed USC sections")
+    update_parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Rebuild databases from cached USC XML without downloading",
+    )
+    update_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-download, clear existing USC data, and rewrite databases",
+    )
     update_parser.add_argument("--limit", type=int, help="Cap sections for testing")
 
     subparsers.add_parser("db-status", help="Show database status")

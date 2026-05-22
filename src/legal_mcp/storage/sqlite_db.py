@@ -24,6 +24,21 @@ DB_PATH = Path.home() / ".config" / "legal-mcp" / "legal.db"
 # Module-level connection (initialized on first use)
 _connection: Optional[sqlite3.Connection] = None
 
+_SECTION_DASH_CHARS = "-\u2010\u2011\u2012\u2013\u2014"
+_SECTION_DASH_TRANSLATION_TO_ASCII = str.maketrans({char: "-" for char in _SECTION_DASH_CHARS})
+_SECTION_DASH_TRANSLATION_TO_EN_DASH = str.maketrans({char: "\u2013" for char in _SECTION_DASH_CHARS})
+
+
+def _section_lookup_variants(section: str) -> list[str]:
+    """Return equivalent USC section strings for common dash variants."""
+    section = str(section).strip()
+    variants = [
+        section,
+        section.translate(_SECTION_DASH_TRANSLATION_TO_EN_DASH),
+        section.translate(_SECTION_DASH_TRANSLATION_TO_ASCII),
+    ]
+    return list(dict.fromkeys(variant for variant in variants if variant))
+
 
 def _get_connection() -> sqlite3.Connection:
     """Get or create database connection."""
@@ -63,7 +78,6 @@ async def initialize():
             subchapter TEXT,
             content_hash TEXT,
             effective_date TEXT,
-            source_law TEXT,
             last_updated TEXT,
             citation TEXT GENERATED ALWAYS AS
                 (title || ' USC § ' || section) STORED,
@@ -139,6 +153,12 @@ async def initialize():
     usc_columns = {row["name"] for row in cursor.fetchall()}
     if "content_hash" not in usc_columns:
         cursor.execute("ALTER TABLE usc_sections ADD COLUMN content_hash TEXT")
+        usc_columns.add("content_hash")
+    if "source_law" in usc_columns:
+        try:
+            cursor.execute("ALTER TABLE usc_sections DROP COLUMN source_law")
+        except sqlite3.OperationalError as e:
+            logger.warning("Could not drop legacy usc_sections.source_law column: %s", e)
 
     # Create indexes for USC
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usc_citation ON usc_sections(title, section)")
@@ -210,6 +230,17 @@ async def get_section(table: str, title: str, section: str) -> Optional[dict]:
     conn = _get_connection()
     cursor = conn.cursor()
 
+    if table == "usc_sections":
+        for section_variant in _section_lookup_variants(section):
+            cursor.execute(
+                "SELECT * FROM usc_sections WHERE title = ? AND section = ?",
+                (title, section_variant),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        return None
+
     query = f"SELECT * FROM {table} WHERE title = ? AND section = ?"
     cursor.execute(query, (title, section))
 
@@ -242,7 +273,7 @@ async def insert_sections(table: str, sections: list[dict]) -> int:
     # Determine columns based on table
     if table == "usc_sections":
         columns = ["title", "section", "heading", "text", "chapter", "subchapter",
-                   "content_hash", "effective_date", "source_law", "last_updated"]
+                   "content_hash", "effective_date", "last_updated"]
         placeholders = ", ".join(["?"] * len(columns))
 
         query = f"""
@@ -261,7 +292,6 @@ async def insert_sections(table: str, sections: list[dict]) -> int:
                 s.get("subchapter"),
                 s.get("content_hash"),
                 s.get("effective_date"),
-                s.get("source_law"),
                 s.get("last_updated", datetime.now().isoformat())
             )
             for s in sections
@@ -394,7 +424,6 @@ async def delete_usc_sections(title: str, sections: list[str]) -> int:
 async def set_usc_section_hashes(
     title: str,
     section_hashes: dict[str, str],
-    release_point: str | None = None,
 ) -> int:
     """Backfill/update content hashes for existing USC sections."""
     if not section_hashes:
@@ -404,27 +433,14 @@ async def set_usc_section_hashes(
     cursor = conn.cursor()
     now = datetime.now().isoformat()
 
-    if release_point is None:
-        cursor.executemany(
-            """
-            UPDATE usc_sections
-            SET content_hash = ?, last_updated = ?
-            WHERE title = ? AND section = ?
-            """,
-            [(content_hash, now, title, section) for section, content_hash in section_hashes.items()],
-        )
-    else:
-        cursor.executemany(
-            """
-            UPDATE usc_sections
-            SET content_hash = ?, source_law = ?, last_updated = ?
-            WHERE title = ? AND section = ?
-            """,
-            [
-                (content_hash, release_point, now, title, section)
-                for section, content_hash in section_hashes.items()
-            ],
-        )
+    cursor.executemany(
+        """
+        UPDATE usc_sections
+        SET content_hash = ?, last_updated = ?
+        WHERE title = ? AND section = ?
+        """,
+        [(content_hash, now, title, section) for section, content_hash in section_hashes.items()],
+    )
 
     updated_count = cursor.rowcount
     conn.commit()

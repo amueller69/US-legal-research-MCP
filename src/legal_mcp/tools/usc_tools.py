@@ -22,7 +22,6 @@ async def get_usc_section(title: str, section: str) -> dict:
             "text": "Every person who...",
             "chapter": "21",
             "effective_date": "1871-04-20",
-            "source_law": "Public Law 119-83"
         }
 
     Examples:
@@ -36,13 +35,12 @@ async def get_usc_section(title: str, section: str) -> dict:
         return {"error": f"Section not found: {title} USC § {section}"}
 
     return {
-        "citation": f"{title} USC § {section}",
+        "citation": result.get("citation") or f"{title} USC § {result.get('section', section)}",
         "heading": result.get("heading"),
         "text": result.get("text"),
         "chapter": result.get("chapter"),
         "subchapter": result.get("subchapter"),
         "effective_date": result.get("effective_date"),
-        "source_law": result.get("source_law"),
     }
 
 
